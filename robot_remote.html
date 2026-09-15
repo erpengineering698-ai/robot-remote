@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Robot Internet Remote</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:#10141b;color:#fff;font-family:Arial,sans-serif;text-align:center}
+.container{max-width:520px;margin:auto;padding:16px}
+h1{margin:8px 0 4px;font-size:25px}
+.status{margin:8px auto 14px;padding:10px;border-radius:12px;background:#303744;font-weight:bold}
+.status.ok{background:#145c38}.status.bad{background:#742b2b}
+input{width:100%;padding:12px;margin:5px 0;border:0;border-radius:9px;background:#252c38;color:white;font-size:15px}
+button{border:0;border-radius:16px;color:white;font-weight:bold;cursor:pointer;touch-action:none}
+.connect{width:100%;padding:13px;margin:7px 0;background:#276ef1;font-size:17px}
+.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:16px 0}
+.move{height:82px;font-size:28px;background:#283241;box-shadow:0 4px 0 #151a22}
+.move:active,.stop:active,.auto:active{transform:translateY(3px);box-shadow:none}
+.stop{height:82px;font-size:20px;background:#d83a3a;box-shadow:0 4px 0 #7e2020}
+.auto{width:100%;padding:15px;margin:8px 0;background:#7651d8;font-size:18px}
+.auto.on{background:#16a06b}
+.card{background:#1b212b;padding:15px;border-radius:15px;margin-top:14px}
+.row{display:flex;justify-content:space-between;margin:10px 0 3px}
+.range{width:100%}
+.small{font-size:12px;color:#aeb7c5}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>🤖 Robot Internet Remote</h1>
+<div id="status" class="status bad">● DISCONNECTED</div>
+
+<div class="card">
+  <input id="host" value="7448313af1904c699e089d715d1a3c09.s1.eu.hivemq.cloud" placeholder="HiveMQ Host">
+  <input id="user" value="robot" placeholder="Username">
+  <input id="pass" type="password" placeholder="HiveMQ Password">
+  <button class="connect" id="connectBtn" onclick="connectMQTT()">CONNECT</button>
+  <div class="small">WebSocket: 8884 &nbsp; /mqtt</div>
+</div>
+
+<div class="controls">
+  <div></div>
+  <button class="move" data-cmd="F">▲</button>
+  <div></div>
+
+  <button class="move" data-cmd="L">◀</button>
+  <button class="stop" onclick="stopRobot()">STOP</button>
+  <button class="move" data-cmd="R">▶</button>
+
+  <div></div>
+  <button class="move" data-cmd="B">▼</button>
+  <div></div>
+</div>
+
+<button id="autoBtn" class="auto" onclick="toggleAuto()">🤖 AUTO AVOID: OFF</button>
+
+<div class="card">
+  <div class="row"><b>M1 SPEED</b><b id="m1v">180</b></div>
+  <input class="range" id="m1" type="range" min="0" max="255" value="180">
+  <div class="row"><b>M4 SPEED</b><b id="m4v">180</b></div>
+  <input class="range" id="m4" type="range" min="0" max="255" value="180">
+  <button class="connect" onclick="sendSpeed()">SET SPEED</button>
+</div>
+
+<div class="small" style="margin-top:14px">
+Hold a direction button to move. Release = STOP.
+</div>
+</div>
+
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script>
+let client=null;
+let auto=false;
+let holdTimer=null;
+let currentCmd=null;
+
+const TOPIC="robot/car/cmd";
+
+const statusEl=document.getElementById("status");
+const connectBtn=document.getElementById("connectBtn");
+const m1=document.getElementById("m1");
+const m4=document.getElementById("m4");
+
+m1.oninput=()=>document.getElementById("m1v").textContent=m1.value;
+m4.oninput=()=>document.getElementById("m4v").textContent=m4.value;
+
+function setStatus(text,ok){
+  statusEl.textContent="● "+text;
+  statusEl.className="status "+(ok?"ok":"bad");
+}
+
+function connectMQTT(){
+  const host=document.getElementById("host").value.trim();
+  const user=document.getElementById("user").value.trim();
+  const pass=document.getElementById("pass").value;
+
+  if(!host || !user || !pass){
+    alert("Host, username and password দিতে হবে.");
+    return;
+  }
+
+  if(client) try{client.end(true)}catch(e){}
+
+  setStatus("CONNECTING...",false);
+  connectBtn.textContent="CONNECTING...";
+
+  const clientId="AndroidRemote-"+Math.random().toString(16).slice(2);
+
+  client=mqtt.connect("wss://"+host+":8884/mqtt",{
+    clientId:clientId,
+    username:user,
+    password:pass,
+    clean:true,
+    reconnectPeriod:3000,
+    connectTimeout:10000
+  });
+
+  client.on("connect",()=>{
+    setStatus("CONNECTED",true);
+    connectBtn.textContent="CONNECTED";
+    client.subscribe(TOPIC);
+    client.publish("robot/car/status","REMOTE ONLINE");
+  });
+
+  client.on("reconnect",()=>{
+    setStatus("RECONNECTING...",false);
+  });
+
+  client.on("close",()=>{
+    setStatus("DISCONNECTED",false);
+    connectBtn.textContent="CONNECT";
+    stopRobot(false);
+  });
+
+  client.on("error",(err)=>{
+    console.log(err);
+    setStatus("CONNECTION ERROR",false);
+  });
+}
+
+function publish(cmd){
+  if(!client || !client.connected){
+    setStatus("NOT CONNECTED",false);
+    return;
+  }
+  client.publish(TOPIC,cmd,{qos:0});
+}
+
+function startMove(cmd){
+  if(auto) return;
+  currentCmd=cmd;
+  publish(cmd);
+  clearInterval(holdTimer);
+  holdTimer=setInterval(()=>publish(cmd),200);
+}
+
+function releaseMove(){
+  clearInterval(holdTimer);
+  holdTimer=null;
+  currentCmd=null;
+  if(!auto) publish("S");
+}
+
+function stopRobot(show=true){
+  clearInterval(holdTimer);
+  holdTimer=null;
+  currentCmd=null;
+  publish("S");
+}
+
+document.querySelectorAll(".move").forEach(btn=>{
+  const cmd=btn.dataset.cmd;
+  btn.addEventListener("pointerdown",e=>{
+    e.preventDefault();
+    btn.setPointerCapture?.(e.pointerId);
+    startMove(cmd);
+  });
+  btn.addEventListener("pointerup",e=>{
+    e.preventDefault();
+    releaseMove();
+  });
+  btn.addEventListener("pointercancel",releaseMove);
+  btn.addEventListener("pointerleave",e=>{
+    if(e.buttons===0) releaseMove();
+  });
+});
+
+function toggleAuto(){
+  if(!client || !client.connected){
+    setStatus("NOT CONNECTED",false);
+    return;
+  }
+
+  stopRobot(false);
+  publish("A");
+  auto=!auto;
+
+  const b=document.getElementById("autoBtn");
+
+  if(auto){
+    b.textContent="🤖 AUTO AVOID: ON";
+    b.classList.add("on");
+  }else{
+    b.textContent="🤖 AUTO AVOID: OFF";
+    b.classList.remove("on");
+  }
+}
+
+function sendSpeed(){
+  if(auto){
+    alert("AUTO mode বন্ধ করে speed change করো.");
+    return;
+  }
+
+  const cmd="V"+m1.value+","+m4.value;
+  publish(cmd);
+}
+
+window.addEventListener("blur",()=>{
+  if(!auto) stopRobot(false);
+});
+</script>
+</body>
+</html>
